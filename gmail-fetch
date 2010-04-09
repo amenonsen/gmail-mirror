@@ -1,0 +1,202 @@
+#!/usr/bin/perl
+# Abhijit Menon-Sen <ams@toroid.org>
+#
+
+use IO::Select;
+use IO::Socket::SSL;
+
+$verbose = 0;
+while ( $ARGV[0] eq '-v' ) {
+    shift @ARGV;
+    $verbose++;
+}
+
+$pw = "";
+$user = shift @ARGV || die "Syntax: gmail-fetch [-v] <username> <mailbox>";
+$mailbox = shift @ARGV || die "Syntax: gmail-fetch [-v] <username> <mailbox>";
+
+( my $local = $mailbox ) =~ y{/ }{._};
+
+mkdir "gmail" unless -d "gmail";
+mkdir "gmail/$local" unless -d "gmail/$local";
+
+do {
+    eval { fetch( $mailbox ) };
+    print "ERROR: $@" and sleep 2 if $@;
+} while ( $@ );
+
+sub fetch {
+    my ($m) = @_;
+
+    my $buf;
+    my $state = 0;
+    my $literal = 0;
+    my ( @msns, $uid, $uidvalidity );
+
+    print "Connecting to imap.gmail.com:993\n";
+    my $imap = IO::Socket::SSL->new( "imap.gmail.com:993" )
+        or die "Couldn't connect: " . IO::Socket::SSL::errstr();
+
+    unless ( defined $imap->blocking( 0 ) ) {
+        die "Couldn't set socket non-blocking: $!";
+    }
+
+    my $sel = IO::Select->new( $imap );
+    while ( 1 ) {
+        next unless $sel->can_read( 2 );
+
+        my $n = $imap->sysread( $buf, 1024, length $buf );
+
+        if ( not defined $n ) {
+            # A read error here would normally mean something broke, but
+            # with IO::Socket::SSL, it seems to mean "no data available
+            # right now".
+            next;
+        }
+        elsif ( $n == 0 ) {
+            die "Connection closed unexpectedly in state $state"
+                unless $state eq "logout";
+            return;
+        }
+
+        # If there's any more data available, get it all.
+        while ( defined $n && $n == 1024 ) {
+            $n = $imap->sysread( $buf, 1024, length $buf )
+        }
+
+        # If we're reading a literal, we'll avoid the usual line-by-line
+        # processing and go straight to the literal-reading code inside.
+        goto LITERAL if $literal;
+
+        while ( $buf =~ s/^(.*?)\r\n//sm ) {
+            my $line = $1;
+            print "S: $line\n" if $verbose;
+
+            if ( $line =~ /^x(?:yz)? BAD /i ) {
+                print "ERROR: Unexpected syntax error\n";
+                return;
+            }
+
+            if ( $state == 0 ) {
+                unless ( $pw ) {
+                    system( "stty -echo" );
+                    print "Password: ";
+                    chomp( $pw = <STDIN> );
+                    print "\n";
+                    system( "stty echo" );
+                }
+                $imap->writeln( qq{x LOGIN "$user" "$pw"} );
+                $state++;
+                next;
+            }
+
+            if ( $state == 1 ) {
+                if ( $line =~ /^x NO /i ) {
+                    print "ERROR: Authentication failed\n";
+                    return;
+                }
+                elsif ( $line =~ /^x OK /i ) {
+                    $imap->writeln( qq{x EXAMINE "$mailbox"} );
+                    $state++;
+                    next;
+                }
+            }
+
+            if ( $state == 2 ) {
+                if ( $line =~ /^x NO /i ) {
+                    print "ERROR: Couldn't select mailbox '$mailbox'\n";
+                    return;
+                }
+                elsif ( $line =~ /^\* / ) {
+                    if ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]$/ ) {
+                        $uidvalidity = $1;
+                        mkdir "gmail/$local/$uidvalidity"
+                            unless -d "gmail/$local/$uidvalidity";
+                        mkdir "gmail/$local/$uidvalidity/new"
+                            unless -d "gmail/$local/$uidvalidity/new";
+                    }
+                }
+                elsif ( $line =~ /^x OK /i ) {
+                    $imap->writeln( qq{x FETCH 1:* UID} );
+                    $state++;
+                    next;
+                }
+            }
+
+            if ( $state == 3 ) {
+                if ( $line =~ /^x NO /i ) {
+                    print "ERROR: Couldn't fetch UID map\n";
+                    return;
+                }
+                elsif ( $line =~ /^\* (\d+) FETCH \(UID (\d+)\)$/ ) {
+                    my ( $msn, $uid ) = ( $1, $2 );
+                    push @msns, $msn
+                        unless -f "gmail/$local/$uidvalidity/new/$uid";
+                }
+                elsif ( $line =~ /^x OK /i ) {
+                    my @set;
+                    @msns = sort { $a <=> $b } @msns;
+                    while ( @msns ) {
+                        my ( $min, $max );
+
+                        $min = $max = shift @msns;
+                        while ( $msns[0] == $max+1 ) {
+                            $max = shift @msns;
+                        }
+
+                        if ( $min == $max ) {
+                            push @set, $min;
+                        }
+                        else {
+                            push @set, "$min:$max";
+                        }
+                    }
+
+                    my $set = join ",", @set;
+                    unless ( $set ) {
+                        print "Local mailbox gmail/$local/$uidvalidity already ".
+                              "has all the mail from $mailbox\n";
+                        return;
+                    }
+                    $imap->writeln( qq{x FETCH $set (UID BODY.PEEK[])} );
+                    $state++;
+                    next;
+                }
+            }
+
+            if ( $state == 4 ) {
+                if ( $line =~ /^\* \d+ FETCH \(UID (\d+) BODY\[\] {(\d+)}$/ ) {
+                    ( $uid, $literal ) = ($1, $2);
+        LITERAL:
+                    last if length $buf < $literal;
+                    my $file = "gmail/$local/$uidvalidity/new/$uid";
+                    print "Saving message $uid to $file ($literal bytes)\n";
+                    unless ( open ( F, "+>", $file ) ) {
+                        print "ERROR: Can't open $file: $!\n";
+                        return;
+                    }
+                    print F substr( $buf, 0, $literal, '' );
+                    close F;
+                    $literal = 0;
+                }
+                elsif ( $line =~ /^x OK /i ) {
+                    $imap->writeln( qq{xyz LOGOUT} );
+                    $state++;
+                    next;
+                }
+            }
+
+            if ( $state == 5 ) {
+                $state = "logout" if $line =~ /^xyz OK /i;
+            }
+        }
+    }
+}
+
+sub IO::Socket::SSL::writeln {
+    my ($s, $line) = @_;
+    $s->blocking(1);
+    print "C: $line\n" if $main::verbose;
+    print $s $line, "\r\n";
+    $s->blocking(0);
+}
