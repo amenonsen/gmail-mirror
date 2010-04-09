@@ -11,7 +11,7 @@ while ( $ARGV[0] eq '-v' ) {
     $verbose++;
 }
 
-$pw = "";
+$pw = $ENV{GMAIL_PASSWORD};
 $user = shift @ARGV || die "Syntax: gmail-fetch [-v] <username> <mailbox> ...";
 die "Syntax: gmail-fetch [-v] <username> <mailbox> ...\n" unless @ARGV;
 
