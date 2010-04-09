@@ -22,13 +22,13 @@ foreach my $mailbox ( @ARGV ) {
     mkdir "gmail/$local" unless -d "gmail/$local";
 
     do {
-        eval { fetch( $mailbox ) };
+        eval { fetch( $mailbox, $local ) };
         print "ERROR: $@" and sleep 2 if $@;
     } while ( $@ );
 }
 
 sub fetch {
-    my ($m) = @_;
+    my ( $m, $l ) = @_;
 
     my $buf;
     my $state = 0;
@@ -112,10 +112,10 @@ sub fetch {
                 elsif ( $line =~ /^\* / ) {
                     if ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]$/ ) {
                         $uidvalidity = $1;
-                        mkdir "gmail/$local/$uidvalidity"
-                            unless -d "gmail/$local/$uidvalidity";
-                        mkdir "gmail/$local/$uidvalidity/new"
-                            unless -d "gmail/$local/$uidvalidity/new";
+                        mkdir "gmail/$l/$uidvalidity"
+                            unless -d "gmail/$l/$uidvalidity";
+                        mkdir "gmail/$l/$uidvalidity/new"
+                            unless -d "gmail/$l/$uidvalidity/new";
                     }
                 }
                 elsif ( $line =~ /^x OK /i ) {
@@ -133,7 +133,7 @@ sub fetch {
                 elsif ( $line =~ /^\* (\d+) FETCH \(UID (\d+)\)$/ ) {
                     my ( $msn, $uid ) = ( $1, $2 );
                     push @msns, $msn
-                        unless -f "gmail/$local/$uidvalidity/new/$uid";
+                        unless -f "gmail/$l/$uidvalidity/new/$uid";
                 }
                 elsif ( $line =~ /^x OK /i ) {
                     my @set;
@@ -156,7 +156,7 @@ sub fetch {
 
                     my $set = join ",", @set;
                     unless ( $set ) {
-                        print "Local mailbox gmail/$local/$uidvalidity already ".
+                        print "Local mailbox gmail/$l/$uidvalidity already ".
                               "has all the mail from $m\n";
                         return;
                     }
@@ -171,7 +171,7 @@ sub fetch {
                     ( $uid, $literal ) = ($1, $2);
         LITERAL:
                     last if length $buf < $literal;
-                    my $file = "gmail/$local/$uidvalidity/new/$uid";
+                    my $file = "gmail/$l/$uidvalidity/new/$uid";
                     print "Saving message $uid to $file ($literal bytes)\n";
                     unless ( open ( F, "+>", $file ) ) {
                         print "ERROR: Can't open $file: $!\n";
