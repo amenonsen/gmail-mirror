@@ -319,17 +319,24 @@ sub imap_processor {
 }
 
 my $msns = 0;
+my $list = 0;
 sub show_response {
     my ( $state, $line ) = @_;
 
     if ( $V ) {
-        if ( $line =~ /^\* \d+ FETCH \(UID \d+\)$/ ) {
+        if ( $V > 1 ) {
+            print "S$state: $line\n";
+        }
+        elsif ( $line =~ /^\* \d+ FETCH \(UID \d+\)$/ ) {
             $msns++;
-            print "S$state: <...MSN-UID map...>\n" if $V == 1 && $msns == 1;
-            print "S$state: $line\n" if $V > 1;
+            print "S$state: <...MSN-UID map...>\n" if $msns == 1;
+        }
+        elsif ( $line =~ /^\* LIST / ) {
+            $list++;
+            print "S$state: <...mailbox list...>\n" if $list == 1;
         }
         else {
-            $msns = 0;
+            $msns = $list = 0;
             print "S$state: $line\n";
         }
     }
