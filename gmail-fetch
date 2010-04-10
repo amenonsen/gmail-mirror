@@ -33,7 +33,7 @@ sub fetch {
     my $buf;
     my $state = 0;
     my $literal = 0;
-    my ( @msns, @tmps );
+    my ( $msns, @msns, @tmps );
     my ( $dir, $file, $fh, $uid, $uidvalidity );
 
     print "Connecting to imap.gmail.com:993\n";
@@ -73,7 +73,22 @@ sub fetch {
 
         while ( $buf =~ s/^(.*?)\r\n//sm ) {
             my $line = $1;
-            print "S: $line\n" if $verbose;
+
+            if ( $verbose ) {
+                if ( $line =~ /^\* \d+ FETCH \(UID \d+\)$/ ) {
+                    $msns++;
+                    if ( $verbose > 1 ) {
+                        print "S: $line\n";
+                    }
+                    elsif ( $msns == 1 ) {
+                        print "S: <...MSN-UID map...>\n";
+                    }
+                }
+                else {
+                    print "S: $line\n";
+                    $msns = 0;
+                }
+            }
 
             if ( $line =~ /^x(?:yz)? BAD /i ) {
                 print "ERROR: Unexpected syntax error\n";
