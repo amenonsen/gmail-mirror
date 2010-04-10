@@ -1,5 +1,15 @@
 #!/usr/bin/perl
+#
+# This program downloads messages from GMail using IMAP and stores them
+# locally in Maildir-format mailboxes. It copes with disconnections and
+# interruptions gracefully, and tries to pick up downloading where it
+# left off.
+#
+# Use, modification, and distribution of this code is allowed without
+# any limitations. There is no warranty, express or implied.
+#
 # Abhijit Menon-Sen <ams@toroid.org>
+# http://toroid.org/ams/etc/gmail-imap-mirror
 #
 
 use IO::Select;
