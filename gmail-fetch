@@ -33,7 +33,7 @@ sub fetch {
     my $buf;
     my $state = 0;
     my $literal = 0;
-    my ( $dir, @msns, $uid, $uidvalidity );
+    my ( $dir, $file, $fh, @msns, $uid, $uidvalidity );
 
     print "Connecting to imap.gmail.com:993\n";
     my $imap = IO::Socket::SSL->new( "imap.gmail.com:993" )
@@ -165,20 +165,39 @@ sub fetch {
                 }
             }
 
+            # Each FETCH response will contain the UID and some literal
+            # data from the BODY[]. We append the data to tmp/$uid as we
+            # receive it, and rename the file to new/$uid when the whole
+            # literal is received. If the last step is skipped due to a
+            # network error or interrupt, we will ask for the remaining
+            # data next time.
+
             if ( $state == 4 ) {
                 if ( $line =~ /^\* \d+ FETCH \(UID (\d+) BODY\[\] {(\d+)}$/ ) {
                     ( $uid, $literal ) = ($1, $2);
-        LITERAL:
-                    last if length $buf < $literal;
-                    my $file = "$dir/new/$uid";
-                    print "Saving message $uid to $file ($literal bytes)\n";
-                    unless ( open ( F, "+>", $file ) ) {
+                    $written = 0;
+                    $file = "$dir/tmp/$uid";
+                    unless ( open ( $fh, ">>", "$dir/tmp/$uid" ) ) {
                         print "ERROR: Can't open $file: $!\n";
                         return;
                     }
-                    print F substr( $buf, 0, $literal, '' );
-                    close F;
-                    $literal = 0;
+        LITERAL:
+                    $data = substr( $buf, 0, $literal-$written, '' ) or last;
+                    unless ( syswrite $fh, $data ) {
+                        print "ERROR: Can't write to $file: $!\n";
+                        return;
+                    }
+                    $written += length $data;
+
+                    if ( $written == $literal ) {
+                        print "Saving message $dir/new/$uid ($literal bytes)\n";
+                        unless ( rename( $file, "$dir/new/$uid" ) ) {
+                            print "ERROR: Can't rename $file: $!\n";
+                            return;
+                        }
+                        $written = $literal = 0;
+                        close $fh;
+                    }
                 }
                 elsif ( $line =~ /^x OK /i ) {
                     $imap->writeln( qq{xyz LOGOUT} );
