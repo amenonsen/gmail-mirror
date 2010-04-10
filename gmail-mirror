@@ -15,41 +15,37 @@
 use IO::Select;
 use IO::Socket::SSL;
 
-$verbose = 0;
+$V = 0;
 while ( $ARGV[0] eq '-v' ) {
     shift @ARGV;
-    $verbose++;
+    $V++;
 }
 
-my $syntax = "Syntax: gmail-fetch [-v] <username> <mailbox> ...\n";
+my $syntax = "Syntax: gmail-fetch [-v] <username> [<mailbox> ...]\n";
 
-my $pw = $ENV{GMAIL_PASSWORD};
 my $user = shift @ARGV || die $syntax;
-die $syntax unless @ARGV;
+my $pass = $ENV{GMAIL_PASSWORD};
+unless ( $pass ) {
+    system( "stty -echo" );
+    print "Password: ";
+    chomp( $pass = <STDIN> );
+    print "\n";
+    system( "stty echo" );
+}
 
 mkdir "gmail" unless -d "gmail";
 
-foreach my $mailbox ( @ARGV ) {
-    ( my $local = $mailbox ) =~ y{/ }{._};
-    mkdir "gmail/$local" unless -d "gmail/$local";
+do {
+    eval {
+        mirror( @ARGV );
+    };
+    print "ERROR: $@" and sleep 2 if $@;
+} while ( $@ );
 
-    do {
-        eval { fetch( $mailbox, $local ) };
-        print "ERROR: $@" and sleep 2 if $@;
-    } while ( $@ );
-}
+sub mirror {
+    my ( @mailboxes ) = @_;
 
-sub fetch {
-    my ( $m, $l ) = @_;
-
-    my $buf;
-    my $state = 0;
-    my $literal = 0;
-    my $written = 0;
-    my ( $msns, @msns, @tmps );
-    my ( $dir, $file, $fh, $uid, $uidvalidity );
-
-    print "Fetching mailbox $m from imap.gmail.com:993\n";
+    print "Connecting to imap.gmail.com:993\n";
     my $imap = IO::Socket::SSL->new( "imap.gmail.com:993" )
         or die "Couldn't connect: " . IO::Socket::SSL::errstr();
 
@@ -57,6 +53,9 @@ sub fetch {
         die "Couldn't set socket non-blocking: $!";
     }
 
+    my $processor = imap_processor( $imap, @mailboxes );
+
+    my $buf;
     my $sel = IO::Select->new( $imap );
     while ( 1 ) {
         next unless $sel->can_read( 2 );
@@ -69,169 +68,215 @@ sub fetch {
             # right now".
             next;
         }
-        elsif ( $n == 0 ) {
-            die "Connection closed unexpectedly in state $state"
-                unless $state eq "logout";
-            return;
+        elsif ( $n != 0 ) {
+            # If there's any more data available, get it all.
+            while ( defined $n && $n == 1024 ) {
+                $n = $imap->sysread( $buf, 1024, length $buf )
+            }
+        }
+        else {
+            $buf = undef;
         }
 
-        # If there's any more data available, get it all.
-        while ( defined $n && $n == 1024 ) {
-            $n = $imap->sysread( $buf, 1024, length $buf )
+        my $error = $processor->( \$buf );
+        last if defined $error;
+    }
+}
+
+sub imap_processor {
+    # This is all the state the IMAP processor maintains
+
+    my ( $imap, @mailboxes ) = @_;
+    my $state = 1;
+    my $literal = 0;
+    my $written = 0;
+    my ( $mailbox, $local, @partial, @full );
+    my ( $uid, $uidvalidity, $dir, $file, $fh );
+
+    # And this is the IMAP processor, closed over all that state.
+
+    return sub {
+        my ( $buf ) = @_;
+
+        unless ( defined $$buf ) {
+            die "Connection closed unexpectedly in state $state"
+                unless $state eq "closing";
+            return 0;
         }
 
         # If we're reading a literal, we'll avoid the usual line-by-line
         # processing and go straight to the literal-reading code inside.
         goto LITERAL if $literal;
 
-        while ( $buf =~ s/^(.*?)\r\n//sm ) {
+        while ( $$buf =~ s/^(.*?)\r\n//sm ) {
             my $line = $1;
 
-            if ( $verbose ) {
-                if ( $line =~ /^\* \d+ FETCH \(UID \d+\)$/ ) {
-                    $msns++;
-                    if ( $verbose > 1 ) {
-                        print "S: $line\n";
-                    }
-                    elsif ( $msns == 1 ) {
-                        print "S: <...MSN-UID map...>\n";
-                    }
-                }
-                else {
-                    print "S: $line\n";
-                    $msns = 0;
-                }
-            }
+            show_response( $state, $line );
 
             if ( $line =~ /^x(?:yz)? BAD /i ) {
-                print "ERROR: Unexpected syntax error\n";
-                return;
+                print "ERROR: Unexpected syntax error; Exiting.\n";
+                return 0;
             }
 
-            if ( $state == 0 ) {
-                unless ( $pw ) {
-                    system( "stty -echo" );
-                    print "Password: ";
-                    chomp( $pw = <STDIN> );
-                    print "\n";
-                    system( "stty echo" );
-                }
-                $imap->writeln( qq{x LOGIN "$user" "$pw"} );
+            # Authenticate.
+
+            if ( $state == 1 ) {
+                $imap->writeln( qq{a LOGIN "$user" "$pass"} );
                 $state++;
                 next;
             }
 
-            if ( $state == 1 ) {
-                if ( $line =~ /^x NO /i ) {
-                    print "ERROR: Authentication failed\n";
-                    return;
-                }
-                elsif ( $line =~ /^x OK /i ) {
-                    $imap->writeln( qq{x EXAMINE "$m"} );
-                    $state++;
-                    next;
-                }
-            }
+            # Fetch the mailbox list, unless one was given to us.
 
             if ( $state == 2 ) {
-                if ( $line =~ /^x NO /i ) {
-                    print "ERROR: Couldn't select mailbox '$m'\n";
-                    return;
+                if ( $line =~ /^a NO /i ) {
+                    print "ERROR: Authentication failed\n";
+                    return 0;
                 }
-                elsif ( $line =~ /^\* / ) {
-                    if ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]$/ ) {
-                        $uidvalidity = $1;
-                        $dir = "gmail/$l/$uidvalidity";
-                        mkdir $dir unless -d $dir;
-                        mkdir "$dir/new" unless -d "$dir/new";
-                        mkdir "$dir/tmp" unless -d "$dir/tmp";
+                elsif ( $line =~ /^a OK /i ) {
+                    if ( @mailboxes ) {
+                        $state += 2;
+                    }
+                    else {
+                        $imap->writeln( qq{b LIST "" "*"} );
+                        $state++;
+                        next;
                     }
                 }
-                elsif ( $line =~ /^x OK /i ) {
-                    $imap->writeln( qq{x FETCH 1:* UID} );
+            }
+
+            # Parse the mailbox list (if we asked for one above).
+
+            if ( $state == 3 ) {
+                if ( $line =~ /^b NO /i ) {
+                    print "ERROR: Couldn't fetch mailbox list\n";
+                    return 0;
+                }
+                elsif ( $line =~ /^\* LIST (?:\([^\)]+\) )?"\/" "([^"]+)"$/ ) {
+                    my $mailbox = $1;
+
+                    # Skip special mailboxes
+                    next if $line =~ /\\NoSelect/i;
+                    next if ( $mailbox =~ /^\[Google Mail\]/ &&
+                              not( $mailbox =~ /\/Drafts$/ ||
+                                   $mailbox =~ /\/Sent Mail$/ ) );
+
+                    push @mailboxes, $mailbox;
+                }
+                elsif ( $line =~ /^b OK /i ) {
+                    $state++;
+                }
+            }
+
+            # Examine each mailbox in turn.
+
+            if ( $state == 4 ) {
+        REEXAMINE:
+                $state = 4;
+                if ( @mailboxes ) {
+                    $mailbox = shift @mailboxes;
+                    print "Examining mailbox $mailbox\n";
+                    $imap->writeln( qq{c EXAMINE "$mailbox"} );
+                    $state++;
+                    next;
+                }
+                else {
+                    $state = 8;
+                }
+            }
+
+            # Set up the local mailbox based on the EXAMINE response and
+            # fetch the MSN-UID map.
+
+            if ( $state == 5 ) {
+                if ( $line =~ /^c NO /i ) {
+                    print "ERROR: Couldn't select mailbox '$mailbox'\n";
+                    return 0;
+                }
+                elsif ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]$/ ) {
+                    $uidvalidity = $1;
+
+                    ( $local = $mailbox ) =~ y{/ }{._};
+
+                    $dir = "gmail/$local";
+                    mkdir $dir unless -d $dir;
+
+                    $dir .= "/$uidvalidity";
+                    mkdir $dir unless -d $dir;
+                    mkdir "$dir/new" unless -d "$dir/new";
+                    mkdir "$dir/tmp" unless -d "$dir/tmp";
+                }
+                elsif ( $line =~ /^c OK /i ) {
+                    @partial = @full = ();
+                    $imap->writeln( qq{d FETCH 1:* UID} );
                     $state++;
                     next;
                 }
             }
 
-            # We receive the MSN->UID map and check which UIDs we have
-            # already. If it's in tmp, it wasn't fully downloaded, so we
-            # construct a partial FETCH for it; otherwise we add it to a
-            # set of messages for which we send one consolidated FETCH.
+            # Check which UIDs we recognise. If there's a file in new,
+            # we don't need to do anything. If there's a file in tmp,
+            # the message (probably) wasn't downloaded fully, so we
+            # construct a partial FETCH for it; otherwise we add the
+            # message to a set for which we issue a consolidated FETCH.
 
-            if ( $state == 3 ) {
-                if ( $line =~ /^x NO /i ) {
-                    print "ERROR: Couldn't fetch UID map\n";
-                    return;
+            if ( $state == 6 ) {
+                if ( $line =~ /^d NO /i ) {
+                    print "ERROR: Couldn't fetch MSN-UID map\n";
+                    return 0;
                 }
                 elsif ( $line =~ /^\* (\d+) FETCH \(UID (\d+)\)$/ ) {
                     my ( $msn, $uid ) = ( $1, $2 );
                     if ( -f "$dir/tmp/$uid" ) {
                         my $n = -s "$dir/tmp/$uid";
-                        push @tmps,
-                            qq{x FETCH $msn (UID BODY[]<$n.2147483648>)};
+                        push @partial,
+                            qq{f FETCH $msn (UID BODY[]<$n.2147483648>)};
                     }
                     elsif ( ! -f "$dir/new/$uid" ) {
-                        push @msns, $msn;
+                        push @full, $msn;
                     }
                 }
-                elsif ( $line =~ /^x OK /i ) {
-                    my @set;
-                    @msns = sort { $a <=> $b } @msns;
-                    while ( @msns ) {
-                        my ( $min, $max );
-
-                        $min = $max = shift @msns;
-                        while ( $msns[0] == $max+1 ) {
-                            $max = shift @msns;
-                        }
-
-                        if ( $min == $max ) {
-                            push @set, $min;
-                        }
-                        else {
-                            push @set, "$min:$max";
-                        }
+                elsif ( $line =~ /^d OK /i ) {
+                    unless ( @partial || @full ) {
+                        print "Mailbox $mailbox is already in sync with $dir\n";
+                        goto REEXAMINE;
                     }
 
-                    my $set = join ",", @set;
-                    unless ( $set || @tmps ) {
-                        print "Mail from $m already downloaded to $dir\n";
-                        return;
-                    }
-                    foreach ( @tmps ) {
+                    print "Fetching ", ~~@partial, "+", ~~@full, " messages\n";
+
+                    foreach ( @partial ) {
                         $imap->writeln( $_ );
                     }
-                    if ( $set ) {
-                        $imap->writeln( qq{xyz FETCH $set (UID BODY[])} );
+                    if ( @full ) {
+                        my $set = reduce_set( @full );
+                        $imap->writeln( qq{ff FETCH $set (UID BODY[])} );
                     }
+
                     $state++;
                     next;
                 }
             }
 
-            # Each FETCH response will contain the UID and some literal
+            # Every FETCH response will contain the UID and some literal
             # data from the BODY[]. We append the data to tmp/$uid as we
             # receive it, and rename the file to new/$uid when the whole
-            # literal is received. If the last step is skipped due to a
-            # network error or interrupt, we will ask for the remaining
-            # data next time.
+            # literal is received.
 
-            if ( $state == 4 ) {
+            if ( $state == 7 ) {
                 if ( $line =~ /^\* \d+ FETCH \(UID (\d+) BODY\[\](?:<\d+>)? {(\d+)}$/ ) {
                     ( $uid, $literal ) = ($1, $2);
                     $written = 0;
                     $file = "$dir/tmp/$uid";
                     unless ( open ( $fh, ">>", "$dir/tmp/$uid" ) ) {
                         print "ERROR: Can't open $file: $!\n";
-                        return;
+                        return 0;
                     }
         LITERAL:
-                    my $data = substr( $buf, 0, $literal-$written, '' );
+                    my $data = substr( $$buf, 0, $literal-$written, '' );
                     if ( $data ) {
                         unless ( syswrite $fh, $data ) {
                             print "ERROR: Can't write to $file: $!\n";
-                            return;
+                            return 0;
                         }
                         $written += length $data;
                     }
@@ -240,31 +285,81 @@ sub fetch {
                     print "Saving message $dir/new/$uid (got $literal bytes)\n";
                     unless ( rename( $file, "$dir/new/$uid" ) ) {
                         print "ERROR: Can't rename $file: $!\n";
-                        return;
+                        return 0;
                     }
                     $written = $literal = 0;
                     close $fh;
                 }
-                elsif ( $line =~ /^xyz OK /i ) {
+                elsif ( $line =~ /^ff? NO /i ) {
+                    print "ERROR: Couldn't fetch messages\n";
+                    return 0;
+                }
+                elsif ( $line =~ /^ff OK /i ) {
                     # We cheat and pay attention only to the very last
                     # OK response to the FETCHes we sent.
-                    $imap->writeln( qq{pqr LOGOUT} );
-                    $state++;
-                    next;
+                    goto REEXAMINE;
                 }
             }
 
-            if ( $state == 5 ) {
-                $state = "logout" if $line =~ /^pqr OK /i;
+            # Nothing left to do but say goodbye
+
+            if ( $state == 8 ) {
+                $imap->writeln( qq{x LOGOUT} );
+                $state = 9;
+                next;
+            }
+
+            if ( $state == 9 ) {
+                $state = "closing" if $line =~ /^x OK /i;
             }
         }
+
+        return;
+    };
+}
+
+my $msns = 0;
+sub show_response {
+    my ( $state, $line ) = @_;
+
+    if ( $V ) {
+        if ( $line =~ /^\* \d+ FETCH \(UID \d+\)$/ ) {
+            $msns++;
+            print "S$state: <...MSN-UID map...>\n" if $V == 1 && $msns == 1;
+            print "S$state: $line\n" if $V > 1;
+        }
+        else {
+            $msns = 0;
+            print "S$state: $line\n";
+        }
     }
+}
+
+sub reduce_set {
+    my @out;
+    my @in = sort { $a <=> $b } @_;
+    while ( @in ) {
+        my ( $min, $max );
+        $min = $max = shift @in;
+        while ( $in[0] == $max+1 ) {
+            $max = shift @in;
+        }
+
+        if ( $min == $max ) {
+            push @out, $min;
+        }
+        else {
+            push @out, "$min:$max";
+        }
+    }
+
+    return join ",", @out;
 }
 
 sub IO::Socket::SSL::writeln {
     my ($s, $line) = @_;
     $s->blocking(1);
-    print "C: $line\n" if $main::verbose;
+    print "C: $line\n" if $main::V;
     print $s $line, "\r\n";
     $s->blocking(0);
 }
