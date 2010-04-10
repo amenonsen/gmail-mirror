@@ -33,7 +33,8 @@ sub fetch {
     my $buf;
     my $state = 0;
     my $literal = 0;
-    my ( $dir, $file, $fh, @msns, $uid, $uidvalidity );
+    my ( @msns, @tmps );
+    my ( $dir, $file, $fh, $uid, $uidvalidity );
 
     print "Connecting to imap.gmail.com:993\n";
     my $imap = IO::Socket::SSL->new( "imap.gmail.com:993" )
@@ -125,6 +126,11 @@ sub fetch {
                 }
             }
 
+            # We receive the MSN->UID map and check which UIDs we have
+            # already. If it's in tmp, it wasn't fully downloaded, so we
+            # construct a partial FETCH for it; otherwise we add it to a
+            # set of messages for which we send one consolidated FETCH.
+
             if ( $state == 3 ) {
                 if ( $line =~ /^x NO /i ) {
                     print "ERROR: Couldn't fetch UID map\n";
@@ -132,8 +138,14 @@ sub fetch {
                 }
                 elsif ( $line =~ /^\* (\d+) FETCH \(UID (\d+)\)$/ ) {
                     my ( $msn, $uid ) = ( $1, $2 );
-                    push @msns, $msn
-                        unless -f "$dir/new/$uid" || -f "$dir/tmp/$uid";
+                    if ( -f "$dir/tmp/$uid" ) {
+                        my $n = -s "$dir/tmp/$uid";
+                        push @tmps,
+                            qq{x FETCH $msn (UID BODY[]<$n.2147483648>)};
+                    }
+                    elsif ( ! -f "$dir/new/$uid" ) {
+                        push @msns, $msn;
+                    }
                 }
                 elsif ( $line =~ /^x OK /i ) {
                     my @set;
@@ -155,11 +167,16 @@ sub fetch {
                     }
 
                     my $set = join ",", @set;
-                    unless ( $set ) {
+                    unless ( $set || @tmps ) {
                         print "Mail from $m already downloaded to $dir\n";
                         return;
                     }
-                    $imap->writeln( qq{x FETCH $set (UID BODY.PEEK[])} );
+                    foreach ( @tmps ) {
+                        $imap->writeln( $_ );
+                    }
+                    if ( $set ) {
+                        $imap->writeln( qq{xyz FETCH $set (UID BODY[])} );
+                    }
                     $state++;
                     next;
                 }
@@ -173,7 +190,7 @@ sub fetch {
             # data next time.
 
             if ( $state == 4 ) {
-                if ( $line =~ /^\* \d+ FETCH \(UID (\d+) BODY\[\] {(\d+)}$/ ) {
+                if ( $line =~ /^\* \d+ FETCH \(UID (\d+) BODY\[\](?:<\d+>)? {(\d+)}$/ ) {
                     ( $uid, $literal ) = ($1, $2);
                     $written = 0;
                     $file = "$dir/tmp/$uid";
@@ -182,32 +199,35 @@ sub fetch {
                         return;
                     }
         LITERAL:
-                    $data = substr( $buf, 0, $literal-$written, '' ) or last;
-                    unless ( syswrite $fh, $data ) {
-                        print "ERROR: Can't write to $file: $!\n";
-                        return;
-                    }
-                    $written += length $data;
-
-                    if ( $written == $literal ) {
-                        print "Saving message $dir/new/$uid ($literal bytes)\n";
-                        unless ( rename( $file, "$dir/new/$uid" ) ) {
-                            print "ERROR: Can't rename $file: $!\n";
+                    my $data = substr( $buf, 0, $literal-$written, '' );
+                    if ( $data ) {
+                        unless ( syswrite $fh, $data ) {
+                            print "ERROR: Can't write to $file: $!\n";
                             return;
                         }
-                        $written = $literal = 0;
-                        close $fh;
+                        $written += length $data;
                     }
+                    last if $written < $literal;
+
+                    print "Saving message $dir/new/$uid (got $literal bytes)\n";
+                    unless ( rename( $file, "$dir/new/$uid" ) ) {
+                        print "ERROR: Can't rename $file: $!\n";
+                        return;
+                    }
+                    $written = $literal = 0;
+                    close $fh;
                 }
-                elsif ( $line =~ /^x OK /i ) {
-                    $imap->writeln( qq{xyz LOGOUT} );
+                elsif ( $line =~ /^xyz OK /i ) {
+                    # We cheat and pay attention only to the very last
+                    # OK response to the FETCHes we sent.
+                    $imap->writeln( qq{pqr LOGOUT} );
                     $state++;
                     next;
                 }
             }
 
             if ( $state == 5 ) {
-                $state = "logout" if $line =~ /^xyz OK /i;
+                $state = "logout" if $line =~ /^pqr OK /i;
             }
         }
     }
