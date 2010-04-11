@@ -217,8 +217,9 @@ sub imap_processor {
 
                     $dir .= "/$uidvalidity";
                     mkdir $dir unless -d $dir;
-                    mkdir "$dir/new" unless -d "$dir/new";
                     mkdir "$dir/tmp" unless -d "$dir/tmp";
+                    mkdir "$dir/new" unless -d "$dir/new";
+                    mkdir "$dir/cur" unless -d "$dir/cur";
                 }
                 elsif ( $line =~ /^c OK /i ) {
                     @partial = @full = ();
