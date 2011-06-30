@@ -1,0 +1,17 @@
+gmail-mirror
+
+This program uses IMAP to download mail from GMail into local
+Maildir-format mailboxes. It tries to cope with interruptions
+gracefully, and picks up downloading where it left off.
+
+See http://toroid.org/ams/etc/gmail-imap-mirror for more details.
+
+You may use, modify, or redistribute this program freely, but please
+retain the copyright notice, and clearly identify modified versions
+as being different from the original. There is no warranty.
+
+Feedback is welcome.
+
+--
+Abhijit Menon-Sen <ams@toroid.org>
+http://github.com/amenonsen/gmail-mirror

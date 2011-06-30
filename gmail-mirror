@@ -19,10 +19,11 @@
 # mailboxes. An IMAP mailbox named x is the set of messages labelled x.)
 # You can run "gmail-mirror.pl -v user" for verbose progress updates.
 #
-# Use, modification, and distribution of this code is allowed without
-# any limitations. There is no warranty, express or implied.
+# You may use, modify, or redistribute this program freely, but please
+# retain the copyright notice, and clearly identify modified versions
+# as being different from the original. There is no warranty.
 #
-# Abhijit Menon-Sen <ams@toroid.org>
+# Copyright 2010 Abhijit Menon-Sen <ams@toroid.org>
 # http://toroid.org/ams/etc/gmail-imap-mirror
 #
 
