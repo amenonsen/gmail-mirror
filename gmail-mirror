@@ -208,7 +208,7 @@ sub imap_processor {
                     print "ERROR: Couldn't select mailbox '$mailbox'\n";
                     return 0;
                 }
-                elsif ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]$/ ) {
+                elsif ( $line =~ /^\* OK \[UIDVALIDITY (\d+)\]/ ) {
                     $uidvalidity = $1;
 
                     ( $local = $mailbox ) =~ y{/ }{._};
@@ -246,7 +246,7 @@ sub imap_processor {
                     if ( -f "$dir/tmp/$uid" ) {
                         my $n = -s "$dir/tmp/$uid";
                         push @partial,
-                            qq{f FETCH $msn (UID BODY[]<$n.2147483648>)};
+                            qq{f FETCH $msn (UID BODY[]<$n.2147483647>)};
                     }
                     elsif ( ! -f "$dir/new/$uid" ) {
                         push @full, $msn;
