@@ -299,12 +299,12 @@ sub imap_processor {
                     last if $written < $literal;
 
                     print "Saving message $dir/new/$uid (got $literal bytes)\n";
+                    close $fh;
                     unless ( rename( $file, "$dir/new/$uid" ) ) {
                         print "ERROR: Can't rename $file: $!\n";
                         return 0;
                     }
                     $written = $literal = 0;
-                    close $fh;
                 }
                 elsif ( $line =~ /^ff? NO /i ) {
                     print "ERROR: Couldn't fetch messages\n";
